@@ -7,7 +7,7 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-TOKEN = os.getenv("TOKEN")
+TOKEN = os.environ.get("TOKEN") or os.getenv("TOKEN")
 
 if not TOKEN:
     print("❌ خطأ: لم يتم العثور على توكن ديسكورد في ملف .env")
@@ -16,7 +16,7 @@ if not TOKEN:
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# إعدادات ساوند كلاود (تحميل مؤقت لضمان عمل الصوت 100%)
+# إعدادات ساوند كلاود
 ytdl_format_options = {
     'format': 'bestaudio/best',
     'outtmpl': '%(id)s.%(ext)s',
@@ -35,8 +35,10 @@ ytdl_format_options = {
     }],
 }
 
+# ⚠️ هنا السر: إجبار ffmpeg على إخراج الصوت بالصيغة التي يقبلها ديسكورد
 ffmpeg_options = {
-    'options': '-vn'
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -filter:a "volume=1.0" -ar 48000 -ac 2 -f s16le -loglevel error'
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -95,12 +97,18 @@ def play_next(interaction: discord.Interaction, vc):
                 
         current_song = next_song
         
+        # إضافة دالة طباعة الأخطاء بعد انتهاء الصوت
+        def after_playing(error):
+            if error:
+                print(f"❌ خطأ في التشغيل: {error}")
+            play_next(interaction, vc)
+        
         source = discord.PCMVolumeTransformer(
             discord.FFmpegPCMAudio(next_song['file'], **ffmpeg_options), 
             volume=current_volume
         )
         
-        vc.play(source, after=lambda e: play_next(interaction, vc))
+        vc.play(source, after=after_playing)
         
         embed = discord.Embed(title="🎶 يشتغل الآن", description=f"**{next_song['title']}**", color=discord.Color.green())
         asyncio.run_coroutine_threadsafe(interaction.channel.send(embed=embed), bot.loop)
@@ -199,7 +207,13 @@ async def play(interaction: discord.Interaction, search: str):
             await interaction.followup.send(f"➕ أضفت للقائمة: **{player.title}**")
         else:
             current_song = song_info
-            vc.play(player, after=lambda e: play_next(interaction, vc))
+            
+            def after_playing(error):
+                if error:
+                    print(f"❌ خطأ في التشغيل: {error}")
+                play_next(interaction, vc)
+                
+            vc.play(player, after=after_playing)
             
             embed = discord.Embed(title="🎶 يشتغل الآن", description=f"**{player.title}**", color=discord.Color.green())
             embed.set_footer(text=f"طلبه: {interaction.user.display_name}")
