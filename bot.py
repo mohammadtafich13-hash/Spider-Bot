@@ -10,17 +10,15 @@ load_dotenv()
 TOKEN = os.environ.get("TOKEN") or os.getenv("TOKEN")
 
 if not TOKEN:
-    print("❌ خطأ: لم يتم العثور على توكن ديسكورد في ملف .env")
+    print("❌ خطأ: لم يتم العثور على توكن ديسكورد")
     exit(1)
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# إعدادات ساوند كلاود
+# إعدادات البث المباشر من SoundCloud (بدون تحميل)
 ytdl_format_options = {
     'format': 'bestaudio/best',
-    'outtmpl': '%(id)s.%(ext)s',
-    'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
     'ignoreerrors': False,
@@ -28,17 +26,12 @@ ytdl_format_options = {
     'quiet': True,
     'no_warnings': True,
     'source_address': '0.0.0.0',
-    'postprocessors': [{
-        'key': 'FFmpegExtractAudio',
-        'preferredcodec': 'mp3',
-        'preferredquality': '192',
-    }],
 }
 
-# ⚠️ هنا السر: إجبار ffmpeg على إخراج الصوت بالصيغة التي يقبلها ديسكورد
+# خيارات ffmpeg للبث المباشر
 ffmpeg_options = {
     'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -filter:a "volume=1.0" -ar 48000 -ac 2 -f s16le -loglevel error'
+    'options': '-vn'
 }
 
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
@@ -50,27 +43,27 @@ deafened = False
 current_volume = 1.0
 
 class YTDLSource(discord.PCMVolumeTransformer):
-    def __init__(self, source, *, data, volume=0.5, filename=None):
+    def __init__(self, source, *, data, volume=0.5):
         super().__init__(source, volume)
         self.data = data
         self.title = data.get('title')
-        self.filename = filename
+        self.url = data.get('url')
 
     @classmethod
-    async def from_url(cls, url, *, loop=None):
+    async def from_url(cls, url, *, loop=None, stream=True):
         loop = loop or asyncio.get_event_loop()
         search_query = url if "soundcloud.com" in url else f"scsearch:{url}"
-            
-        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=True))
+        
+        # stream=True تعني بث مباشر بدون تحميل
+        data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=not stream))
         
         if 'entries' in data:
             data = data['entries'][0]
             
-        filename = ytdl.prepare_filename(data)
-        base, _ = os.path.splitext(filename)
-        filename = base + '.mp3'
-        
-        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data, filename=filename)
+        filename = data['url'] if stream else ytdl.prepare_filename(data)
+        return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
+
+# ----------------- دوال مساعدة -----------------
 
 async def ensure_voice(interaction: discord.Interaction):
     if not interaction.user.voice:
@@ -90,21 +83,15 @@ def play_next(interaction: discord.Interaction, vc):
     global current_song, current_volume
     if queue:
         next_song = queue.pop(0)
-        
-        if current_song and os.path.exists(current_song['file']):
-            try: os.remove(current_song['file'])
-            except: pass
-                
         current_song = next_song
         
-        # إضافة دالة طباعة الأخطاء بعد انتهاء الصوت
         def after_playing(error):
             if error:
                 print(f"❌ خطأ في التشغيل: {error}")
             play_next(interaction, vc)
-        
+            
         source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(next_song['file'], **ffmpeg_options), 
+            discord.FFmpegPCMAudio(next_song['url'], **ffmpeg_options), 
             volume=current_volume
         )
         
@@ -113,10 +100,9 @@ def play_next(interaction: discord.Interaction, vc):
         embed = discord.Embed(title="🎶 يشتغل الآن", description=f"**{next_song['title']}**", color=discord.Color.green())
         asyncio.run_coroutine_threadsafe(interaction.channel.send(embed=embed), bot.loop)
     else:
-        if current_song and os.path.exists(current_song['file']):
-            try: os.remove(current_song['file'])
-            except: pass
         current_song = None
+
+# ----------------- أزرار التحكم -----------------
 
 class MusicControls(discord.ui.View):
     def __init__(self, interaction: discord.Interaction):
@@ -180,12 +166,14 @@ class MusicControls(discord.ui.View):
         else:
             await interaction.response.send_message("ما أنا داخل قناة أصلاً.", ephemeral=True)
 
+# ----------------- الأوامر -----------------
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f"✅ البوت شغّال: {bot.user}")
 
-@bot.tree.command(name="شغل", description="شغّل أغنية من SoundCloud")
+@bot.tree.command(name="شغل", description="شغّل أغنية من SoundCloud (بث مباشر)")
 @app_commands.describe(search="اسم الأغنية أو رابط SoundCloud")
 async def play(interaction: discord.Interaction, search: str):
     global current_song, current_volume
@@ -195,12 +183,12 @@ async def play(interaction: discord.Interaction, search: str):
     if not vc: return
         
     try:
-        await interaction.followup.send(f"⏳ جاري تحميل الأغنية: **{search}** ...")
+        await interaction.followup.send(f"🔎 جاري البحث والبث المباشر: **{search}** ...")
         
-        player = await YTDLSource.from_url(search, loop=bot.loop)
+        player = await YTDLSource.from_url(search, loop=bot.loop, stream=True)
         player.volume = current_volume
         
-        song_info = {'title': player.title, 'file': player.filename}
+        song_info = {'title': player.title, 'url': player.url}
         
         if vc.is_playing():
             queue.append(song_info)
@@ -215,7 +203,7 @@ async def play(interaction: discord.Interaction, search: str):
                 
             vc.play(player, after=after_playing)
             
-            embed = discord.Embed(title="🎶 يشتغل الآن", description=f"**{player.title}**", color=discord.Color.green())
+            embed = discord.Embed(title="🎶 يشتغل الآن (SoundCloud)", description=f"**{player.title}**", color=discord.Color.orange())
             embed.set_footer(text=f"طلبه: {interaction.user.display_name}")
             await interaction.followup.send(embed=embed, view=MusicControls(interaction))
             
