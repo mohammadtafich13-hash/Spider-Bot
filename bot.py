@@ -5,23 +5,27 @@ import yt_dlp
 import asyncio
 import os
 from dotenv import load_dotenv
-from groq import Groq
-import google.generativeai as genai
+from openai import OpenAI
 
 load_dotenv()
 TOKEN = os.environ.get("TOKEN") or os.getenv("TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY")
 
 if not TOKEN:
     print("❌ خطأ: لم يتم العثور على توكن ديسكورد")
     exit(1)
 
-# إعداد عملاء الذكاء الاصطناعي
-groq_client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+if not CEREBRAS_API_KEY:
+    print("❌ خطأ: لم يتم العثور على مفتاح Cerebras")
+    exit(1)
 
+# إعداد عميل Cerebras (متوافق مع OpenAI)
+ai_client = OpenAI(
+    api_key=CEREBRAS_API_KEY,
+    base_url="https://api.cerebras.ai/v1"
+)
+
+# البرومت الخاص بشخصية سبايدر
 SPIDER_PROMPT = """انت سبايدر بوت ، بديل عن سبايدر . تتعامل كانك هو ، سبايدر انسان خجول وحساس شوي ، لا يستعمل اي ايموجي الكيبورد ( 😄🥲😡🥳😊😙...) ولا اي ايموجي ايضا ، لديه كلمات ان طلب ان تقولها ستقول وهي : 
 الكلمه : سبايدر
 الاجابه : نوعها : متعدد الاجابات / الاجابات : لبيه ، عيونو ، قلبه ، ها.
@@ -37,9 +41,16 @@ SPIDER_PROMPT = """انت سبايدر بوت ، بديل عن سبايدر . ت
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# --- إعدادات الموسيقى (بدون تغيير) ---
-ytdl_format_options = {'format': 'bestaudio/best', 'noplaylist': True, 'nocheckcertificate': True, 'ignoreerrors': False, 'logtostderr': False, 'quiet': True, 'no_warnings': True, 'source_address': '0.0.0.0'}
-ffmpeg_options = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
+# --- إعدادات الموسيقى ---
+ytdl_format_options = {
+    'format': 'bestaudio/best', 'noplaylist': True, 'nocheckcertificate': True,
+    'ignoreerrors': False, 'logtostderr': False, 'quiet': True, 'no_warnings': True,
+    'source_address': '0.0.0.0',
+}
+ffmpeg_options = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
 queue = []
@@ -60,7 +71,8 @@ class YTDLSource(discord.PCMVolumeTransformer):
         loop = loop or asyncio.get_event_loop()
         search_query = url if "soundcloud.com" in url else f"scsearch:{url}"
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=not stream))
-        if 'entries' in data: data = data['entries'][0]
+        if 'entries' in data:
+            data = data['entries'][0]
         filename = data['url'] if stream else ytdl.prepare_filename(data)
         return cls(discord.FFmpegPCMAudio(filename, **ffmpeg_options), data=data)
 
@@ -70,8 +82,10 @@ async def ensure_voice(interaction: discord.Interaction):
         return None
     channel = interaction.user.voice.channel
     vc = interaction.guild.voice_client
-    if not vc: vc = await channel.connect(self_mute=False, self_deaf=False)
-    elif vc.channel != channel: await vc.move_to(channel)
+    if not vc:
+        vc = await channel.connect(self_mute=False, self_deaf=False)
+    elif vc.channel != channel:
+        await vc.move_to(channel)
     return vc
 
 def play_next(interaction: discord.Interaction, vc):
@@ -82,30 +96,37 @@ def play_next(interaction: discord.Interaction, vc):
         def after_playing(error):
             if error: print(f"❌ خطأ في التشغيل: {error}")
             play_next(interaction, vc)
-        source = discord.PCMVolumeTransformer(discord.FFmpegPCMAudio(next_song['url'], **ffmpeg_options), volume=current_volume)
+        source = discord.PCMVolumeTransformer(
+            discord.FFmpegPCMAudio(next_song['url'], **ffmpeg_options), 
+            volume=current_volume
+        )
         vc.play(source, after=after_playing)
         embed = discord.Embed(title="🎶 يشتغل الآن", description=f"**{next_song['title']}**", color=discord.Color.green())
         asyncio.run_coroutine_threadsafe(interaction.channel.send(embed=embed), bot.loop)
-    else: current_song = None
+    else:
+        current_song = None
 
-# --- أزرار التحكم (بدون تغيير) ---
 class MusicControls(discord.ui.View):
     def __init__(self, interaction: discord.Interaction):
         super().__init__(timeout=None)
         self.interaction = interaction
-    def vc(self): return self.interaction.guild.voice_client
+    def vc(self):
+        return self.interaction.guild.voice_client
 
     @discord.ui.button(label="⏸️ إيقاف/استئناف", style=discord.ButtonStyle.secondary)
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = self.vc()
-        if vc and vc.is_playing(): vc.pause(); await interaction.response.send_message("⏸️ تم الإيقاف المؤقت.", ephemeral=True)
-        elif vc and vc.is_paused(): vc.resume(); await interaction.response.send_message("▶️ تم الاستئناف.", ephemeral=True)
+        if vc and vc.is_playing():
+            vc.pause(); await interaction.response.send_message("⏸️ تم الإيقاف المؤقت.", ephemeral=True)
+        elif vc and vc.is_paused():
+            vc.resume(); await interaction.response.send_message("▶️ تم الاستئناف.", ephemeral=True)
         else: await interaction.response.send_message("ما فيه شي شغّال.", ephemeral=True)
 
     @discord.ui.button(label="⏭️ تخطي", style=discord.ButtonStyle.primary)
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         vc = self.vc()
-        if vc and (vc.is_playing() or vc.is_paused()): vc.stop(); await interaction.response.send_message("⏭️ تم التخطي.", ephemeral=True)
+        if vc and (vc.is_playing() or vc.is_paused()):
+            vc.stop(); await interaction.response.send_message("⏭️ تم التخطي.", ephemeral=True)
         else: await interaction.response.send_message("ما فيه شي شغّال.", ephemeral=True)
 
     @discord.ui.button(label="🔊 +", style=discord.ButtonStyle.success)
@@ -137,21 +158,19 @@ async def on_ready():
     await bot.tree.sync()
     print(f"✅ البوت شغّال: {bot.user}")
 
-# ----------------- الذكاء الاصطناعي (التبديل التلقائي) -----------------
+# ----------------- الذكاء الاصطناعي (Cerebras) -----------------
 
-def ask_groq(text):
-    if not groq_client: raise Exception("Groq client not initialized")
-    chat_completion = groq_client.chat.completions.create(
-        messages=[{"role": "system", "content": SPIDER_PROMPT}, {"role": "user", "content": text}],
-        model="llama3-8b-8192", temperature=0.7, max_tokens=150,
+def ask_cerebras(text):
+    response = ai_client.chat.completions.create(
+        model="llama3.1-8b", # موديل سريع جداً ومتوفر في Cerebras
+        messages=[
+            {"role": "system", "content": SPIDER_PROMPT},
+            {"role": "user", "content": text}
+        ],
+        temperature=0.7,
+        max_tokens=150,
     )
-    return chat_completion.choices[0].message.content
-
-def ask_gemini(text):
-    if not GEMINI_API_KEY: raise Exception("Gemini API key not set")
-    model = genai.GenerativeModel('gemini-1.5-flash') # موديل سريع
-    response = model.generate_content(f"{SPIDER_PROMPT}\n\nUser: {text}")
-    return response.text
+    return response.choices[0].message.content
 
 @bot.event
 async def on_message(message):
@@ -162,26 +181,18 @@ async def on_message(message):
         if not user_text: user_text = "ها؟"
 
         async with message.channel.typing():
-            response_text = None
-            # 1. المحاولة الأولى: Groq
             try:
-                response_text = await asyncio.to_thread(ask_groq, user_text)
+                response_text = await asyncio.to_thread(ask_cerebras, user_text)
             except Exception as e:
-                print(f"⚠️ Groq فشل (قد يكون Rate Limit): {e}")
-                # 2. المحاولة الثانية: Gemini
-                try:
-                    response_text = await asyncio.to_thread(ask_gemini, user_text)
-                    print("✅ تم التبديل إلى Gemini بنجاح")
-                except Exception as e2:
-                    print(f"❌ Gemini فشل أيضاً: {e2}")
-                    response_text = "في مشكلة صارت معي، جرب تكلمني بعد شوي."
+                print(f"❌ Cerebras فشل: {e}")
+                response_text = "في مشكلة صارت معي، جرب تكلمني بعد شوي."
 
         if response_text:
             await message.reply(response_text)
 
     await bot.process_commands(message)
 
-# ----------------- أوامر الموسيقى (بدون تغيير) -----------------
+# ----------------- أوامر الموسيقى -----------------
 @bot.tree.command(name="شغل", description="شغّل أغنية من SoundCloud")
 @app_commands.describe(search="اسم الأغنية أو رابط SoundCloud")
 async def play(interaction: discord.Interaction, search: str):
