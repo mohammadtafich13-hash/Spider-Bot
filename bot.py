@@ -12,7 +12,7 @@ TOKEN = os.environ.get("TOKEN") or os.getenv("TOKEN")
 CEREBRAS_API_KEY = os.environ.get("CEREBRAS_API_KEY")
 
 if not TOKEN or not CEREBRAS_API_KEY:
-    print("❌ تأكد من وجود TOKEN و CEREBRAS_API_KEY")
+    print("❌ تأكد من وجود TOKEN و CEREBRAS_API_KEY في المتغيرات")
     exit(1)
 
 # إعداد Cerebras
@@ -35,12 +35,31 @@ intents.message_content = True
 intents.dm_messages = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# ⚠️ ضع هنا الآي دي الخاص بسيرفرك (أرقام فقط)
+GUILD_ID = 1553410232032432250  # <--- غير هذا الرقم
+
 # --- إعدادات الموسيقى ---
-ytdl_format_options = {'format': 'bestaudio/best', 'noplaylist': True, 'quiet': True}
-ffmpeg_options = {'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5', 'options': '-vn'}
+ytdl_format_options = {
+    'format': 'bestaudio/best', 
+    'noplaylist': True, 
+    'nocheckcertificate': True,
+    'ignoreerrors': False, 
+    'logtostderr': False, 
+    'quiet': True, 
+    'no_warnings': True,
+    'source_address': '0.0.0.0'
+}
+ffmpeg_options = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
 ytdl = yt_dlp.YoutubeDL(ytdl_format_options)
 
-queue, current_song, mic_muted, deafened, current_volume = [], None, False, False, 1.0
+queue = []
+current_song = None
+mic_muted = False
+deafened = False
+current_volume = 1.0
 
 class YTDLSource(discord.PCMVolumeTransformer):
     def __init__(self, source, *, data, volume=0.5):
@@ -48,12 +67,14 @@ class YTDLSource(discord.PCMVolumeTransformer):
         self.data = data
         self.title = data.get('title')
         self.url = data.get('url')
+
     @classmethod
     async def from_url(cls, url, *, loop=None, stream=True):
         loop = loop or asyncio.get_event_loop()
         search_query = url if "soundcloud.com" in url else f"scsearch:{url}"
         data = await loop.run_in_executor(None, lambda: ytdl.extract_info(search_query, download=not stream))
-        if 'entries' in data: data = data['entries'][0]
+        if 'entries' in data: 
+            data = data['entries'][0]
         return cls(discord.FFmpegPCMAudio(data['url'], **ffmpeg_options), data=data)
 
 async def ensure_voice(interaction: discord.Interaction):
@@ -63,8 +84,10 @@ async def ensure_voice(interaction: discord.Interaction):
         return None
     channel = interaction.user.voice.channel
     vc = interaction.guild.voice_client
-    if not vc: vc = await channel.connect(self_mute=False, self_deaf=False)
-    elif vc.channel != channel: await vc.move_to(channel)
+    if not vc: 
+        vc = await channel.connect(self_mute=False, self_deaf=False)
+    elif vc.channel != channel: 
+        await vc.move_to(channel)
     return vc
 
 def play_next(interaction: discord.Interaction, vc):
@@ -79,20 +102,36 @@ def play_next(interaction: discord.Interaction, vc):
         vc.play(source, after=after_playing)
         embed = discord.Embed(title="🎶 يشتغل الآن", description=f"**{next_song['title']}**", color=discord.Color.green())
         asyncio.run_coroutine_threadsafe(interaction.channel.send(embed=embed), bot.loop)
-    else: current_song = None
+    else: 
+        current_song = None
 
 # --- الذكاء الاصطناعي ---
-def ask_ai(text):
+def ask_ai(text, prompt=SPIDER_PROMPT):
     response = ai_client.chat.completions.create(
         model="llama3.1-8b",
-        messages=[{"role": "system", "content": SPIDER_PROMPT}, {"role": "user", "content": text}],
-        temperature=0.7, max_tokens=200,
+        messages=[{"role": "system", "content": prompt}, {"role": "user", "content": text}],
+        temperature=0.7, 
+        max_tokens=200,
     )
     return response.choices[0].message.content
 
 @bot.event
 async def on_ready():
-    await bot.tree.sync()
+    # مزامنة الأوامر في السيرفر المحدد
+    try:
+        guild = discord.Object(id=GUILD_ID)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"✅ تم مزامنة {len(synced)} أمر في السيرفر المحدد.")
+    except Exception as e:
+        print(f"❌ فشل المزامنة في السيرفر: {e}")
+        
+    # مزامنة الأوامر العامة (للاستخدام في الخاص)
+    try:
+        synced_global = await bot.tree.sync()
+        print(f"✅ تم مزامنة {len(synced_global)} أمر عام (قد يتأخر ظهورها قليلاً).")
+    except Exception as e:
+        print(f"❌ فشل المزامنة العامة: {e}")
+
     print(f"✅ المساعد الشخصي شغّال: {bot.user}")
 
 # --- الرد التلقائي في الخاص (DM) ---
@@ -133,13 +172,8 @@ async def translate(interaction: discord.Interaction, text: str):
     await interaction.response.defer()
     prompt = f"ترجم النص التالي ترجمة دقيقة جداً. إذا كان إنجليزي ترجمه عربي، وإذا عربي ترجمه إنجليزي. لا تكتب أي شيء غير الترجمة:\n{text}"
     try:
-        # نستخدم برومت الترجمة بدل برومت سبايدر
-        response = ai_client.chat.completions.create(
-            model="llama3.1-8b",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-        )
-        await interaction.followup.send(f"🌐 **الترجمة:**\n{response.choices[0].message.content}")
+        response_text = await asyncio.to_thread(ask_ai, text, prompt)
+        await interaction.followup.send(f"🌐 **الترجمة:**\n{response_text}")
     except:
         await interaction.followup.send("ما قدرت أترجم، جرب بعدين.")
 
@@ -157,6 +191,7 @@ async def stats(interaction: discord.Interaction):
 
 # --- أوامر الموسيقى ---
 @bot.tree.command(name="شغل", description="شغّل أغنية من SoundCloud")
+@app_commands.describe(search="اسم الأغنية أو رابط SoundCloud")
 async def play(interaction: discord.Interaction, search: str):
     await interaction.response.defer()
     vc = await ensure_voice(interaction)
@@ -173,46 +208,69 @@ async def play(interaction: discord.Interaction, search: str):
             current_song = song_info
             vc.play(player, after=lambda e: play_next(interaction, vc))
             await interaction.followup.send(f"🎶 يشتغل الآن: **{player.title}**")
-    except Exception as e: await interaction.followup.send(f"❌ صار خطأ: {e}")
+    except Exception as e: 
+        await interaction.followup.send(f"❌ صار خطأ: {e}")
 
 @bot.tree.command(name="وقف", description="أوقف الموسيقى واطلع من القناة")
 async def stop(interaction: discord.Interaction):
     vc = interaction.guild.voice_client
-    if vc: queue.clear(); vc.stop(); await vc.disconnect(); await interaction.response.send_message("⏹️ طلعت من القناة.")
-    else: await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
+    if vc: 
+        queue.clear()
+        vc.stop()
+        await vc.disconnect()
+        await interaction.response.send_message("⏹️ طلعت من القناة.")
+    else: 
+        await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
 
 @bot.tree.command(name="ادخل", description="ادخل الفويس بصمت")
 async def join_afk(interaction: discord.Interaction):
     await interaction.response.defer()
     vc = await ensure_voice(interaction)
-    if vc: await interaction.followup.send(f"🎙️ دخلت **{vc.channel.name}**.")
+    if vc: 
+        await interaction.followup.send(f"🎙️ دخلت **{vc.channel.name}**.")
 
-@bot.tree.command(name="افتح_المايك")
+@bot.tree.command(name="افتح_المايك", description="افتح مايك البوت")
 async def unmute(interaction: discord.Interaction):
     global mic_muted
     vc = interaction.guild.voice_client
-    if vc: mic_muted = False; await vc.guild.change_voice_state(channel=vc.channel, self_mute=False, self_deaf=deafened); await interaction.response.send_message("🎙️ فتحت المايك.")
-    else: await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
+    if vc: 
+        mic_muted = False
+        await vc.guild.change_voice_state(channel=vc.channel, self_mute=False, self_deaf=deafened)
+        await interaction.response.send_message("🎙️ فتحت المايك.")
+    else: 
+        await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
 
-@bot.tree.command(name="اقفل_المايك")
+@bot.tree.command(name="اقفل_المايك", description="اقفل مايك البوت")
 async def mute(interaction: discord.Interaction):
     global mic_muted
     vc = interaction.guild.voice_client
-    if vc: mic_muted = True; await vc.guild.change_voice_state(channel=vc.channel, self_mute=True, self_deaf=deafened); await interaction.response.send_message("🔇 قفلت المايك.")
-    else: await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
+    if vc: 
+        mic_muted = True
+        await vc.guild.change_voice_state(channel=vc.channel, self_mute=True, self_deaf=deafened)
+        await interaction.response.send_message("🔇 قفلت المايك.")
+    else: 
+        await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
 
-@bot.tree.command(name="افتح_الدفن")
+@bot.tree.command(name="افتح_الدفن", description="افتح deafen البوت")
 async def undeafen(interaction: discord.Interaction):
     global deafened
     vc = interaction.guild.voice_client
-    if vc: deafened = False; await vc.guild.change_voice_state(channel=vc.channel, self_mute=mic_muted, self_deaf=False); await interaction.response.send_message("🔊 فتحت الدفن.")
-    else: await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
+    if vc: 
+        deafened = False
+        await vc.guild.change_voice_state(channel=vc.channel, self_mute=mic_muted, self_deaf=False)
+        await interaction.response.send_message("🔊 فتحت الدفن.")
+    else: 
+        await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
 
-@bot.tree.command(name="اقفل_الدفن")
+@bot.tree.command(name="اقفل_الدفن", description="اقفل deafen البوت")
 async def deafen(interaction: discord.Interaction):
     global deafened
     vc = interaction.guild.voice_client
-    if vc: deafened = True; await vc.guild.change_voice_state(channel=vc.channel, self_mute=mic_muted, self_deaf=True); await interaction.response.send_message("🔇 قفلت الدفن.")
-    else: await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
+    if vc: 
+        deafened = True
+        await vc.guild.change_voice_state(channel=vc.channel, self_mute=mic_muted, self_deaf=True)
+        await interaction.response.send_message("🔇 قفلت الدفن.")
+    else: 
+        await interaction.response.send_message("أنا مو داخل قناة.", ephemeral=True)
 
 bot.run(TOKEN)
