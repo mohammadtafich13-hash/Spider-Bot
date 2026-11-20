@@ -3,5 +3,4 @@ yt-dlp
 python-dotenv
 PyNaCl
 davey
-groq
-google-generativeai
+openai
